@@ -5,6 +5,10 @@
  */
 
 
+static const int CODE_INVALID_TASK_ID = -2;
+static const int CODE_FILESYSTEM_ERROR = -2;
+static const int CODE_SUCCESS = 0;
+static const int CODE_FAILURE = -1;
 
 /**
  * DESCRIPTION: The function creates the file filename if it does not exist and open the file for writing.
