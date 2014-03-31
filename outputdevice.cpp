@@ -1,14 +1,43 @@
 /*
  * outputdevice.cpp
  *
- *       Multi-threaded Output Device Library
+ *       A Multi-Threaded Output Device Library
  */
 
+#include <string>
+#include <iostream>
+#include <vector>
+#include <queue>
+
+using namespace std;
+
+typedef struct
+{
+	int taskId;
+	char* buff;
+} Task;
 
 static const int CODE_INVALID_TASK_ID = -2;
 static const int CODE_FILESYSTEM_ERROR = -2;
 static const int CODE_SUCCESS = 0;
+static const int CODE_FLUSH_SUCCESS = 0;
 static const int CODE_FAILURE = -1;
+
+static const string ERROR_SYSCALL = "system error";
+static const string ERROR_GENERAL = "Output device library error";
+
+static int taskCount;
+static vector<Task> taskVec;
+static queue<int> writeQueue;
+int nextTaskId = 0;
+
+/**
+ * Writes the given error message to stderr
+ */
+void error(const string& msg)
+{
+	cerr << msg << endl;
+}
 
 /**
  * DESCRIPTION: The function creates the file filename if it does not exist and open the file for writing.
@@ -18,6 +47,7 @@ static const int CODE_FAILURE = -1;
  */
 int initdevice(char* filename)
 {
+	taskCount = 0;
 }
 
 /**
