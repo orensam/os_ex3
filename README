@@ -8,7 +8,15 @@ yoniherzog
 Oren Samuel ID 200170694
 Yoni Herzog ID 200299956
 
-=== Program Description ===
+=== Included files ===
 
+outputdevice.cpp - A Multi-Threaded Output Device Library.
+
+Makefile - Compiles the liboutputdevice static library, and contains other capabilities
+(create tar file, clean program files etc).
+
+README - This file.
+
+=== Program Description ===
 
 
