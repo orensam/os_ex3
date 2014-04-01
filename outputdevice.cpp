@@ -9,6 +9,7 @@
 #include <vector>
 #include <queue>
 #include <set>
+#include <cstring>
 #include <cstdio>
 #include <pthread.h>
 #include <limits.h>
@@ -59,6 +60,23 @@ void error(const string& msg)
 }
 
 /**
+ * Creates a new task from the given buffer and length.
+ */
+Task* createTask(char* buffer, int length)
+{
+	Task * t = new Task();
+	t->buff = new char[strlen(buffer) + 1];
+	strcpy(t->buff, buffer);
+	return t;
+}
+
+void destroyTask(Task * t)
+{
+	delete[] t->buff;
+	delete t;
+}
+
+/**
  * Writer thread function.
  * Handles the actual writing of the tasks to the device, in a non-blocking fashion.
  */
@@ -71,38 +89,48 @@ void* threadRun(void* ptr = NULL)
 		pthread_mutex_lock(&mut);
 		if (writeQueue.empty() && isClosing)
 		{
+			cout << "threadRun: queue empty, and is closing " << endl;
 			pthread_mutex_unlock(&mut);
 			break;
 		}
 
 		// Wait until there is a task that needs to be written
-//		while(writeQueue.empty())
-//		{
-//		}
-		pthread_cond_wait(&queueCond, &mut);
+		if(writeQueue.empty())
+		{
+			pthread_cond_wait(&queueCond, &mut);
+		}
+
+		cout << "threadRun: something in queue!" << endl;
 
 		// Tasks exist in queue, write the first one in line
 		int id = writeQueue.front();
+		cout << "threadRun: trying to write id " << id << ", vec size is " <<  taskVec.size() << endl;
 		writeQueue.pop();
 		Task* t = taskVec[id];
+
+		cout << "threadRun: got task with buffer " << t->buff << endl;
+
 		pthread_mutex_unlock(&mut);
 
 		// Release lock and write the task
 		fwrite(t->buff, sizeof(char), t->length, outFile);
 		taskCount++; // TODO: Handle integer overflow
-		delete t;
+		destroyTask(t);
 
 		// Now acquire lock, add the task to the available IDs set, and signal (for flush2device)
 		pthread_mutex_lock(&mut);
 
 		freeIds.insert(id);
-		pthread_cond_signal(&freeIdsCond);
+		pthread_cond_broadcast(&freeIdsCond);
 
 		pthread_mutex_unlock(&mut);
+//		cout << "threadRun: END LOOP" << endl;
 	}
+	cout << "threadRun: after loop " << endl;
 	isClosing = false;
 	fclose(outFile);
-	pthread_exit(ptr); // TODO: what to return?
+	//pthread_exit(ptr); // TODO: what to return?
+	return ptr;
 }
 
 /**
@@ -121,6 +149,7 @@ int initdevice(char* filename)
 		error(ERROR_GENERAL);
 		return CODE_FAILURE;
 	}
+
 	if (isInited)
 	{
 		// Already initialized - do not init again
@@ -167,8 +196,8 @@ int write2device(char* buffer, int length)
 	}
 
 	// Create a new task
-	Task * t = new Task();
-	t->buff = buffer;
+	Task * t = createTask(buffer, length);
+	cout << "write2device: created task with buffer " << t->buff << endl;
 	t->length = length;
 
 	// Get task ID
@@ -193,12 +222,14 @@ int write2device(char* buffer, int length)
 	// Add to queue
 	writeQueue.push(id);
 	// Signal new task
-	pthread_cond_signal(&queueCond);
+	pthread_cond_broadcast(&queueCond);
 
 	pthread_mutex_unlock(&mut);
+//	cout << "write2device: END" << endl;
 	return id;
-
 }
+
+
 
 /**
  * Returns whether or not the given task_id has ever existed in the system.
@@ -225,6 +256,7 @@ int flush2device(int task_id)
 	    pthread_cond_wait(&freeIdsCond, &mut);
 	}
 	pthread_mutex_unlock(&mut);
+
 	return CODE_FLUSH_SUCCESS;
 }
 
@@ -264,6 +296,7 @@ int howManyWritten()
 void closedevice()
 {
 	isClosing = true;
+	isInited = false;
 }
 
 /**
@@ -282,7 +315,7 @@ int wait4close()
 	pthread_mutex_lock(&mut);
 	while(!writeQueue.empty())
 	{
-			pthread_cond_wait(&queueCond, &mut);
+			pthread_cond_wait(&freeIdsCond, &mut);
 	}
 	pthread_mutex_unlock(&mut);
 
