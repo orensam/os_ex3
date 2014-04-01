@@ -315,7 +315,9 @@ int wait4close()
 	pthread_mutex_lock(&mut);
 	while(!writeQueue.empty())
 	{
-			pthread_cond_wait(&freeIdsCond, &mut);
+		// Wait until a task was written,
+		// Then check again if there's anything in the queue.
+		pthread_cond_wait(&freeIdsCond, &mut);
 	}
 	pthread_mutex_unlock(&mut);
 
