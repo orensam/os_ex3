@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <limits.h>
 
+#include <unistd.h>
 
 using namespace std;
 
@@ -21,13 +22,14 @@ typedef struct
 {
 	char* buff;
 	unsigned long int length;
-	//bool wasWritten;
 } Task;
 
 static const int CODE_ISNT_CLOSING = -2;
 static const int CODE_INVALID_TASK_ID = -2;
 static const int CODE_FILESYSTEM_ERROR = -2;
 static const int CODE_SUCCESS = 0;
+static const int CODE_TASK_WRITTEN = 0;
+static const int CODE_TASK_NOT_WRITTEN = 1;
 static const int CODE_FLUSH_SUCCESS = 1;
 static const int CODE_WAIT4CLOSE_SUCCESS = 1;
 static const int CODE_FAILURE = -1;
@@ -36,19 +38,19 @@ static const string ERROR_SYSCALL = "system error";
 static const string ERROR_GENERAL = "Output device library error";
 
 
-static pthread_mutex_t mut;
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 // Under mutex:
 static vector<Task*> taskVec;
 static queue<int> writeQueue;
 static set<int> freeIds;
-
-static FILE * outFile;
-static int taskCount;
 static bool isClosing = false;
 static bool isInited = false;
 
-static pthread_cond_t freeIdsCond = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t queueCond = PTHREAD_COND_INITIALIZER;
+static FILE * outFile;
+static int taskCount;
+
+static pthread_cond_t signalTaskWritten = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t signalAttemptWrite = PTHREAD_COND_INITIALIZER;
 static pthread_t writeThread;
 
 /**
@@ -65,8 +67,9 @@ void error(const string& msg)
 Task* createTask(char* buffer, int length)
 {
 	Task * t = new Task();
-	t->buff = new char[strlen(buffer) + 1];
-	strcpy(t->buff, buffer);
+	t->length = length;
+	t->buff = new char[length];
+	memcpy(t->buff, buffer, length);
 	return t;
 }
 
@@ -76,6 +79,17 @@ void destroyTask(Task * t)
 	delete t;
 }
 
+void incTaskCount()
+{
+	if (taskCount == INT_MAX)
+	{
+		taskCount = INT_MIN;
+	}
+	else
+	{
+		++taskCount;
+	}
+}
 /**
  * Writer thread function.
  * Handles the actual writing of the tasks to the device, in a non-blocking fashion.
@@ -84,53 +98,63 @@ void* threadRun(void* ptr = NULL)
 {
 	while(true)
 	{
+//		cout << "threadRun: start loop " << endl;
+//		cout << "threadRun: queue empty? " << writeQueue.empty() << endl;
+//		cout << "threadRun: isClosing? " << isClosing << endl;
+
+		pthread_mutex_lock(&lock);
+
+		// Wait until there is a task that needs to be written
+		if(writeQueue.empty() && !isClosing)
+		{
+//			cout << "threadRun: waiting for task to be added" << endl;
+			pthread_cond_wait(&signalAttemptWrite, &lock);
+//			cout << "threadRun: received signalAttemptWrite. queue.empty() is " << writeQueue.empty() << " and isClosing is: " << isClosing << endl;
+		}
+
 		// If the device is closing, and the queue is empty -
 		// We finished writing all the tasks, so the thread finished its jib.
-		pthread_mutex_lock(&mut);
 		if (writeQueue.empty() && isClosing)
 		{
-			cout << "threadRun: queue empty, and is closing " << endl;
-			pthread_mutex_unlock(&mut);
+//			cout << "threadRun: queue empty, and is closing " << endl;
+			pthread_mutex_unlock(&lock);
 			break;
 		}
 
-		// Wait until there is a task that needs to be written
-		if(writeQueue.empty())
-		{
-			pthread_cond_wait(&queueCond, &mut);
-		}
-
-		cout << "threadRun: something in queue!" << endl;
+//		cout << "threadRun: something in queue! Queue size is: " << writeQueue.size() << endl;
 
 		// Tasks exist in queue, write the first one in line
 		int id = writeQueue.front();
-		cout << "threadRun: trying to write id " << id << ", vec size is " <<  taskVec.size() << endl;
 		writeQueue.pop();
 		Task* t = taskVec[id];
+//		cout << "threadRun: popped id " << id << ", queue size is " <<  writeQueue.size() << endl;
 
-		cout << "threadRun: got task with buffer " << t->buff << endl;
+//		cout << "threadRun: got task with buffer " << t->buff << endl;
 
-		pthread_mutex_unlock(&mut);
+		pthread_mutex_unlock(&lock);
 
-		// Release lock and write the task
-		fwrite(t->buff, sizeof(char), t->length, outFile);
-		taskCount++; // TODO: Handle integer overflow
-		destroyTask(t);
+		// Lock released, write the task
+		cout << "threadRun: writing task id  " << id << endl;
+		fwrite(t->buff, sizeof(char), t->length, outFile); //TODO: check for errors
+		incTaskCount();
 
 		// Now acquire lock, add the task to the available IDs set, and signal (for flush2device)
-		pthread_mutex_lock(&mut);
-
+		pthread_mutex_lock(&lock);
+		destroyTask(t);
 		freeIds.insert(id);
-		pthread_cond_broadcast(&freeIdsCond);
+		pthread_mutex_unlock(&lock);
 
-		pthread_mutex_unlock(&mut);
+		pthread_cond_broadcast(&signalTaskWritten);
 //		cout << "threadRun: END LOOP" << endl;
 	}
 	cout << "threadRun: after loop " << endl;
+
+	pthread_mutex_lock(&lock);
 	isClosing = false;
+	pthread_mutex_unlock(&lock);
+
 	fclose(outFile);
-	//pthread_exit(ptr); // TODO: what to return?
-	return ptr;
+	pthread_exit(ptr);
 }
 
 /**
@@ -143,22 +167,27 @@ void* threadRun(void* ptr = NULL)
  */
 int initdevice(char* filename)
 {
-	if (isClosing)
-	{
-		// Device closing - no writing permitted.
-		error(ERROR_GENERAL);
-		return CODE_FAILURE;
-	}
+	pthread_mutex_lock(&lock);
 
+	// Already initialized - do not init again
 	if (isInited)
 	{
-		// Already initialized - do not init again
-		error(ERROR_GENERAL);
+		pthread_mutex_unlock(&lock);
 		return CODE_FAILURE;
 	}
 
-	pthread_mutex_init(&mut, NULL);
+	// Device closing - no writing permitted.
+	if (isClosing)
+	{
+		pthread_mutex_unlock(&lock);
+		return CODE_FAILURE;
+	}
+
+	isInited = true;
 	isClosing = false;
+
+	pthread_mutex_unlock(&lock);
+
 	// Initialize task counter
 	taskCount = 0;
 	outFile = fopen(filename, "ab");
@@ -172,7 +201,6 @@ int initdevice(char* filename)
 		error(ERROR_GENERAL);
 		return CODE_FAILURE;
 	}
-	isInited = true;
 	return CODE_SUCCESS;
 }
 
@@ -197,12 +225,11 @@ int write2device(char* buffer, int length)
 
 	// Create a new task
 	Task * t = createTask(buffer, length);
-	cout << "write2device: created task with buffer " << t->buff << endl;
-	t->length = length;
+	//usleep(100);
 
 	// Get task ID
 	int id;
-	pthread_mutex_lock(&mut);
+	pthread_mutex_lock(&lock);
 	if (freeIds.empty())
 	{
 		id = taskVec.size();
@@ -216,16 +243,15 @@ int write2device(char* buffer, int length)
 		taskVec[id] = t;
 	}
 
-//	pthread_mutex_unlock(&mut);
-//	pthread_mutex_lock(&mut);
-
 	// Add to queue
 	writeQueue.push(id);
+	cout << "write2device: created task id  " << id << endl;
 	// Signal new task
-	pthread_cond_broadcast(&queueCond);
+	pthread_cond_broadcast(&signalAttemptWrite);
+	pthread_mutex_unlock(&lock);
 
-	pthread_mutex_unlock(&mut);
-//	cout << "write2device: END" << endl;
+
+	//	cout << "write2device: END" << endl;
 	return id;
 }
 
@@ -234,7 +260,7 @@ int write2device(char* buffer, int length)
 /**
  * Returns whether or not the given task_id has ever existed in the system.
  */
-bool taskExists(int task_id)
+bool taskExists(unsigned int task_id)
 {
 	return task_id >= 0 && task_id < taskVec.size();
 }
@@ -250,12 +276,12 @@ int flush2device(int task_id)
 		return CODE_INVALID_TASK_ID;
 	}
 
-	pthread_mutex_lock(&mut);
+	pthread_mutex_lock(&lock);
 	while(freeIds.find(task_id) == freeIds.end())
 	{
-	    pthread_cond_wait(&freeIdsCond, &mut);
+	    pthread_cond_wait(&signalTaskWritten, &lock);
 	}
-	pthread_mutex_unlock(&mut);
+	pthread_mutex_unlock(&lock);
 
 	return CODE_FLUSH_SUCCESS;
 }
@@ -272,7 +298,11 @@ int wasItWritten(int task_id)
 	{
 		return CODE_INVALID_TASK_ID;
 	}
-	return (freeIds.find(task_id) != freeIds.end());
+	if (freeIds.find(task_id) != freeIds.end())
+	{
+		return CODE_TASK_WRITTEN;
+	}
+	return CODE_TASK_NOT_WRITTEN;
 }
 
 
@@ -295,8 +325,12 @@ int howManyWritten()
  */
 void closedevice()
 {
+	cout << "closedevice() start" << endl;
+	pthread_mutex_lock(&lock);
 	isClosing = true;
 	isInited = false;
+	pthread_cond_broadcast(&signalAttemptWrite);
+	pthread_mutex_unlock(&lock);
 }
 
 /**
@@ -311,15 +345,7 @@ int wait4close()
 	{
 		return CODE_ISNT_CLOSING;
 	}
-
-	pthread_mutex_lock(&mut);
-	while(!writeQueue.empty())
-	{
-		// Wait until a task was written,
-		// Then check again if there's anything in the queue.
-		pthread_cond_wait(&freeIdsCond, &mut);
-	}
-	pthread_mutex_unlock(&mut);
+	pthread_join(writeThread, NULL);
 
 	return CODE_WAIT4CLOSE_SUCCESS;
 }
