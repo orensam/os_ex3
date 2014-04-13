@@ -19,4 +19,81 @@ README - This file.
 
 === Program Description ===
 
+This is a multi-threaded output device library.
+An external user of this library can use this library to asynchronously write
+buffers into a specified file, using an arbitrary amount of threads.
 
+Structure
+---------
+
+In order to manage the different tasks sent for writing, and support the different
+functionalities in the exercise, we used three data structures:
+
+taskVec - A vector containing Tasks, where each task is just a struct containing a buffer and length.
+The index of the task in the vector is its ID.
+
+writeQueue - A queue of integers, where each integer represents an ID of a specific task.
+
+freeIds - A Set of integers, each integers represents an ID of a task has already been written,
+and is available for re-use.
+
+When the library starts, an output thread (writeThread) is started, and it is responsible for
+writing the tasks received by the library to the device (file).
+
+The three containers mentioned above, as well as two global boolean variables 
+(isClosing and isInited) are all protected by a single mutex (lock).
+This mutex make possible for the library to receive input, and write to the device, concurrently.
+
+Operation
+---------
+
+When a task is received (by write2device), it is added to the task vector.
+Its ID is decided according to the free Ids set - this set contains all the IDs in the range
+0..taskVec.size()-1 that are available. 
+If there is an available ID (i.e, freeIds is not empty), the smallest one is given to the new task.
+If no ID is available, this means that all of the tasks in the vector are still waiting to be 
+written, so the the vector has to be extended, and ID taskVec.size() is given.
+Then, the task is added (or pushed) to the task vector at index [id].
+This whole mechanism exists mostly for the wasItWritten() function - since, in order to know which
+tasks have already been written, we have to remember which IDs out of the vector's indices have
+been outputted to the device.
+
+Throughout the library's run, writeThread runs and writes any available tasks to the device.
+if there is a task id in the queue, it pops it, retrieves the relevant task from the task vector,
+and then writes the task's buffer to the device.
+The writing itself, which might be a time-consuming operation, is done outside the mutex -
+i.e while a buffer is being written to the device, more tasks can be added to the queue.
+After the writing is done, the ID is made available again by adding it to the free IDs set.
+
+This design make the logic of wasItWritten() and the checking of existence of a given task ID 
+very simple - since the task vector can only grow, and the free IDs set keeps track of which 
+indices from the vector are available, a task ID existed iff it is in the range 0..taskVec.size()-1,
+and a task was written iff it is in freeIds.
+
+Condition Variables
+-------------------
+
+To avoid busy-wait loops, we used 2 condition variables:
+
+1. signalTaskWritten - This is a variable which is broadcasted whenever any task finished writing
+to the device. This makes it possible for flush2device() to wait for such a signal, and
+upon receiving it, check whether the relevant task id was actually written.
+
+2. signalAttemptWrite - This is a variable that writeThread waits on - 
+if the queue is empty and the library is not currently closing  (i.e, there is nothing for
+writeThread to do), we wait for the signal. It can be received in two scenarios - 
+a. When a task is added to the queue (by write2device), i.e there is a new task to write 
+to the device.
+b. When closedevice() is called - we want to release writeThread and let it end its run.
+
+Init and Close
+--------------
+
+To avoid multiple parallel initializing and closing, the booleans isInited and isClosing
+are used, and are protected by the mutex, which means that such calls will result in only
+one occurrence of initialization or closing.
+
+When closedevice() is called, as described before, writeThread can finish its run. It first
+closes the device (file), and then exits; if wait4close() is called before its death,
+it waits for that death using pthread_join(), and when that happened, it means the writeThread
+finished all its work and died, i.e the closing process is done.
