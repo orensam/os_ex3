@@ -15,6 +15,7 @@
 #include <limits.h>
 
 #include <unistd.h>
+#include <stdlib.h>
 
 using namespace std;
 
@@ -23,6 +24,7 @@ typedef struct
 	char* buff;
 	unsigned long int length;
 } Task;
+
 
 static const int CODE_ISNT_CLOSING = -2;
 static const int CODE_INVALID_TASK_ID = -2;
@@ -33,6 +35,12 @@ static const int CODE_TASK_NOT_WRITTEN = 1;
 static const int CODE_FLUSH_SUCCESS = 1;
 static const int CODE_WAIT4CLOSE_SUCCESS = 1;
 static const int CODE_FAILURE = -1;
+
+#define LOCK(x) if (pthread_mutex_lock(x)) {return CODE_FAILURE;}
+#define UNLOCK(x) if (pthread_mutex_unlock(x)) {return CODE_FAILURE;}
+#define LOCK_IN_THREAD(x) if (pthread_mutex_lock(x)) {dieNicely();}
+#define UNLOCK_IN_THREAD(x) if (pthread_mutex_unlock(x)) {dieNicely();}
+
 
 static const string ERROR_SYSCALL = "system error";
 static const string ERROR_GENERAL = "Output device library error";
@@ -134,7 +142,7 @@ void* threadRun(void* ptr = NULL)
 		pthread_mutex_unlock(&lock);
 
 		// Lock released, write the task
-		cout << "threadRun: writing task id  " << id << endl;
+//		cout << "threadRun: writing task id  " << id << endl;
 		fwrite(t->buff, sizeof(char), t->length, outFile); //TODO: check for errors
 		incTaskCount();
 
@@ -147,7 +155,7 @@ void* threadRun(void* ptr = NULL)
 		pthread_cond_broadcast(&signalTaskWritten);
 //		cout << "threadRun: END LOOP" << endl;
 	}
-	cout << "threadRun: after loop " << endl;
+//	cout << "threadRun: after loop " << endl;
 
 	pthread_mutex_lock(&lock);
 	isClosing = false;
@@ -216,9 +224,9 @@ int initdevice(char* filename)
  */
 int write2device(char* buffer, int length)
 {
-	if (isClosing)
+	if (isClosing || !isInited)
 	{
-		// Device closing - no writing permitted.
+		// Device closing or not initialized - no writing permitted.
 		error(ERROR_GENERAL);
 		return CODE_FAILURE;
 	}
@@ -245,7 +253,7 @@ int write2device(char* buffer, int length)
 
 	// Add to queue
 	writeQueue.push(id);
-	cout << "write2device: created task id  " << id << endl;
+//	cout << "write2device: created task id  " << id << endl;
 	// Signal new task
 	pthread_cond_broadcast(&signalAttemptWrite);
 	pthread_mutex_unlock(&lock);
@@ -348,6 +356,20 @@ int wait4close()
 	pthread_join(writeThread, NULL);
 
 	return CODE_WAIT4CLOSE_SUCCESS;
+}
+
+/**
+ * Frees the dynamically-allocated memory and kills the whole process.
+ * Meant for use in background-thread errors.
+ */
+void dieNicely()
+{
+	vector<Task*>::iterator it = taskVec.begin();
+	for (; it != taskVec.end(); ++it)
+	{
+		destroyTask(*it);
+	}
+	exit(CODE_FAILURE);
 }
 
 
