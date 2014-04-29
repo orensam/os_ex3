@@ -40,8 +40,8 @@ and is available for re-use.
 When the library starts, an output thread (writeThread) is started, and it is responsible for
 writing the tasks received by the library to the device (file).
 
-The three containers mentioned above, as well as two global boolean variables 
-(isClosing and isInited) are all protected by a single mutex (lock).
+The three containers mentioned above, as well as three global boolean variables 
+(isClosing, isInited, everInited) are all protected by a single mutex (lock).
 This mutex make possible for the library to receive input, and write to the device, concurrently.
 
 Operation
@@ -73,7 +73,8 @@ and a task was written iff it is in freeIds.
 Condition Variables
 -------------------
 
-To avoid busy-wait loops, we used 2 condition variables:
+To avoid busy-wait loops, we used 3 condition variables; They are all dynamically allocated,
+constructed in initdevice() and destroyed when closing the library.
 
 1. signalTaskWritten - This is a variable which is broadcasted whenever any task finished writing
 to the device. This makes it possible for flush2device() to wait for such a signal, and
@@ -86,6 +87,8 @@ a. When a task is added to the queue (by write2device), i.e there is a new task 
 to the device.
 b. When closedevice() is called - we want to release writeThread and let it end its run.
 
+3. signalThreadEnded - Lets wait4close() know when writeThread has ended its run.
+
 Init and Close
 --------------
 
@@ -95,5 +98,5 @@ one occurrence of initialization or closing.
 
 When closedevice() is called, as described before, writeThread can finish its run. It first
 closes the device (file), and then exits; if wait4close() is called before its death,
-it waits for that death using pthread_join(), and when that happened, it means the writeThread
+it waits for that death using a CV, which when broadcasted, it means the writeThread
 finished all its work and died, i.e the closing process is done.
