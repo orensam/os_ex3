@@ -2,7 +2,7 @@
 
 TAR = ex3.tar
 TAR_CMD = tar cvf
-CC = g++ -Wall -lpthread -std=c++11
+CC = g++ -Wall -lpthread
 
 all: lib
 
