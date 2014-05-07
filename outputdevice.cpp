@@ -38,12 +38,12 @@ static const int CODE_WAIT4CLOSE_SUCCESS = 1;
 static const int CODE_FAILURE = -1;
 
 // Macros for locking/unlocking a mutex, and failing nicely if needed.
-#define LOCK(x) if (pthread_mutex_lock(x)) {error(ERROR_GENERAL); return CODE_FAILURE;}
-#define UNLOCK(x) if (pthread_mutex_unlock(x)) {error(ERROR_GENERAL); return CODE_FAILURE;}
-#define LOCK_OR_DIE(x) if (pthread_mutex_lock(x)) {error(ERROR_GENERAL); dieNicely();}
-#define UNLOCK_OR_DIE(x) if (pthread_mutex_unlock(x)) {error(ERROR_GENERAL); dieNicely();}
+#define LOCK(x) if (pthread_mutex_lock(x)) {error(ERROR_SYSCALL); return CODE_FAILURE;}
+#define UNLOCK(x) if (pthread_mutex_unlock(x)) {error(ERROR_SYSCALL); return CODE_FAILURE;}
+#define LOCK_OR_DIE(x) if (pthread_mutex_lock(x)) {error(ERROR_SYSCALL); dieNicely();}
+#define UNLOCK_OR_DIE(x) if (pthread_mutex_unlock(x)) {error(ERROR_SYSCALL); dieNicely();}
 
-// static const string ERROR_SYSCALL = "system error"; // Used nowhere.
+static const string ERROR_SYSCALL = "system error";
 static const string ERROR_GENERAL = "Output device library error";
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -80,6 +80,10 @@ void error(const string& msg)
 Task* createTask(char* buffer, int length)
 {
 	Task * t = new Task();
+	if (!t)
+	{
+		return t;
+	}
 	t->length = length;
 	t->buff = new char[length];
 	memcpy(t->buff, buffer, length);
@@ -195,6 +199,7 @@ void* threadRun(void* ptr = NULL)
 		// Lock released, write the task
 		if (fwrite(t->buff, sizeof(char), t->length, outFile) < t->length)
 		{
+			error(ERROR_SYSCALL);
 			dieNicely();
 		}
 		incTaskCount();
@@ -211,6 +216,7 @@ void* threadRun(void* ptr = NULL)
 
 	if (fclose(outFile))
 	{
+		error(ERROR_SYSCALL);
 		dieNicely();
 	}
 
@@ -250,13 +256,13 @@ int initdevice(char* filename)
 	outFile = fopen(filename, "ab");
 	if (!outFile)
 	{
-		error(ERROR_GENERAL);
+		error(ERROR_SYSCALL);
 		UNLOCK(&lock);
 		return CODE_FILESYSTEM_ERROR;
 	}
 	if (pthread_create(&writeThread, NULL, &threadRun, NULL) != CODE_SUCCESS)
 	{
-		error(ERROR_GENERAL);
+		error(ERROR_SYSCALL);
 		UNLOCK(&lock);
 		return CODE_FAILURE;
 	}
@@ -293,6 +299,11 @@ int write2device(char* buffer, int length)
 
 	// Create a new task
 	Task * t = createTask(buffer, length);
+	if (!t)
+	{
+		error(ERROR_GENERAL);
+		return CODE_FAILURE;
+	}
 	// Get task ID
 	int id;
 
